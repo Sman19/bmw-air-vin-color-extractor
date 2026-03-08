@@ -18,9 +18,8 @@ SLOW_MO_MS = 150
 DEFAULT_TIMEOUT_MS = 30000
 HAS_HEADER = False
 
-# Test small batch first
+# Safer test batch first
 RUN_FILTER = "E202200-E202205"
-
 
 # Excel E = 4, G = 6, I = 8, K = 10
 COL_PAINT_CODE = 4
@@ -118,21 +117,11 @@ def wait_for_vin_box(page):
 
 
 def reset_to_new_vehicle(page):
-    """
-    Click the upper-left 'Select new vehicle' reset button, then wait
-    for the VIN input to be ready again.
-    """
     reset_btn = page.locator("#anchor-remove-button")
     reset_btn.wait_for(state="visible", timeout=DEFAULT_TIMEOUT_MS)
     reset_btn.click()
-
-    # Give AIR time to switch back to search mode
     time.sleep(2)
-
-    # Wait until VIN box is back
     wait_for_vin_box(page)
-
-    # Small extra pause so the field is actually ready for typing
     time.sleep(1.5)
 
 
@@ -178,15 +167,15 @@ def extract_vehicle_data(page):
 
     vin_match = re.search(r"\b(WBS[A-Z0-9]{14})\b", all_text)
     if vin_match:
-        full_vin = vin_match.group(1)
+        full_vin = vin_match.group(1).upper()
 
-    paint_match = re.search(r"Paint code\s+([0-9]{3})\b", all_text, re.IGNORECASE)
+    paint_match = re.search(r"Paint code\s+([A-Z0-9]{3})\b", all_text, re.IGNORECASE)
     if paint_match:
-        paint_code = paint_match.group(1)
+        paint_code = paint_match.group(1).upper()
 
     upholstery_match = re.search(r"Upholstery code\s+([A-Z0-9]{4})\b", all_text, re.IGNORECASE)
     if upholstery_match:
-        upholstery_code = upholstery_match.group(1)
+        upholstery_code = upholstery_match.group(1).upper()
 
     return full_vin, paint_code, upholstery_code, all_text
 
