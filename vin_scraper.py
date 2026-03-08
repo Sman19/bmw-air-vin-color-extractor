@@ -18,8 +18,9 @@ SLOW_MO_MS = 150
 DEFAULT_TIMEOUT_MS = 30000
 HAS_HEADER = False
 
-# Test one VIN first. Change later if it works.
-RUN_FILTER = "E202200"
+# Test small batch first
+RUN_FILTER = "E202200-E202205"
+
 
 # Excel E = 4, G = 6, I = 8, K = 10
 COL_PAINT_CODE = 4
@@ -110,9 +111,36 @@ def find_air_popup_page(context):
     raise RuntimeError("Could not find AIR popup page with VIN input")
 
 
-def search_last7(page, last7: str):
+def wait_for_vin_box(page):
     vin_box = page.locator('#j_idt193\\:vin-search-form\\:vinSearchInputFieldNoKeyboard')
     vin_box.wait_for(state="visible", timeout=DEFAULT_TIMEOUT_MS)
+    return vin_box
+
+
+def reset_to_new_vehicle(page):
+    """
+    Click the upper-left 'Select new vehicle' reset button, then wait
+    for the VIN input to be ready again.
+    """
+    reset_btn = page.locator("#anchor-remove-button")
+    reset_btn.wait_for(state="visible", timeout=DEFAULT_TIMEOUT_MS)
+    reset_btn.click()
+
+    # Give AIR time to switch back to search mode
+    time.sleep(2)
+
+    # Wait until VIN box is back
+    wait_for_vin_box(page)
+
+    # Small extra pause so the field is actually ready for typing
+    time.sleep(1.5)
+
+
+def search_last7(page, last7: str, first_search: bool):
+    if not first_search:
+        reset_to_new_vehicle(page)
+
+    vin_box = wait_for_vin_box(page)
     vin_box.click()
     vin_box.fill("")
     vin_box.type(last7, delay=70)
@@ -187,6 +215,7 @@ def main():
     start_index = 1 if HAS_HEADER else 0
     max_needed_cols = max(COL_PAINT_CODE, COL_UPHOLSTERY, COL_FULL_VIN, COL_LAST7) + 1
     processed_today = 0
+    first_search = True
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=HEADLESS, slow_mo=SLOW_MO_MS)
@@ -235,7 +264,7 @@ def main():
             print(f"\nProcessing row {row_num + 1} | LAST7={last7}")
 
             try:
-                search_last7(air_page, last7)
+                search_last7(air_page, last7, first_search)
 
                 full_vin, paint_code, upholstery_code, all_text = extract_vehicle_data(air_page)
 
@@ -253,6 +282,8 @@ def main():
                 if not full_vin and not paint_code and not upholstery_code:
                     print("Status: extraction failed")
                     print("Debug preview:", all_text[:400])
+                else:
+                    first_search = False
 
             except PlaywrightTimeoutError:
                 print(f"Row {row_num + 1}: Timeout")
