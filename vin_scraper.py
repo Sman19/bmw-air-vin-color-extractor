@@ -1,5 +1,6 @@
 import csv
 import random
+import re
 import time
 from pathlib import Path
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
@@ -15,18 +16,14 @@ BMW_AIR_URL = "https://bmwtechinfo.bmwgroup.com/tisUI/#/login"
 DAILY_LIMIT = 50
 DELAY_MIN = 7
 DELAY_MAX = 18
-SEARCH_LOAD_WAIT = 5
+SEARCH_LOAD_WAIT = 8
 HEADLESS = False
 SLOW_MO_MS = 150
-DEFAULT_TIMEOUT_MS = 20000
+DEFAULT_TIMEOUT_MS = 25000
 HAS_HEADER = False
 
-# Optional filter:
-# Leave blank "" to run all eligible rows
-# Examples:
-# RUN_FILTER = "E202200-E202257"
-# RUN_FILTER = "E202200,E202205,E202244"
-RUN_FILTER = "E202200-E202257"
+# Test one VIN first. Change later if it works.
+RUN_FILTER = "E202200"
 
 # =========================================================
 # COLUMN INDEXES (0-based)
@@ -41,23 +38,6 @@ COL_PAINT_CODE = 4   # E
 COL_UPHOLSTERY = 6   # G
 COL_FULL_VIN = 8     # I
 COL_LAST7 = 10       # K
-
-# =========================================================
-# SELECTORS
-# =========================================================
-
-# Top-left VIN search box on AIR search screen
-SEARCH_INPUT_SELECTOR = 'input[placeholder="Start new search"]'
-
-PAINT_CODE_XPATHS = [
-    'xpath=//*[contains(normalize-space(),"Paint code")]/following-sibling::*[1]',
-    'xpath=//*[contains(normalize-space(),"Paint code")]/following::*[1]',
-]
-
-UPHOLSTERY_CODE_XPATHS = [
-    'xpath=//*[contains(normalize-space(),"Upholstery code")]/following-sibling::*[1]',
-    'xpath=//*[contains(normalize-space(),"Upholstery code")]/following::*[1]',
-]
 
 # =========================================================
 # HELPERS
@@ -78,87 +58,14 @@ def ensure_row_length(row, min_len):
         row.append("")
     return row
 
-def try_extract_from_xpaths(page, xpaths):
-    for xp in xpaths:
-        try:
-            locator = page.locator(xp).first
-            locator.wait_for(state="visible", timeout=5000)
-            txt = clean_text(locator.inner_text())
-            if txt:
-                return txt
-        except Exception:
-            pass
-    return ""
-
-def extract_full_vin(page):
-    """
-    On the result page, the VIN appears directly under the vehicle title,
-    and it includes the current last7. We look for the first visible text
-    that starts with WBS/WBA/WBZ/WBX etc. and is 17 chars.
-    """
-    prefixes = ("WBS", "WBA", "WBX", "WBY", "WBM", "5YM", "4US")
-    try:
-        texts = page.locator("body *").all_inner_texts()
-        for t in texts:
-            txt = clean_text(t)
-            if len(txt) == 17 and txt[:3].upper() in prefixes:
-                return txt
-    except Exception:
-        pass
-    return ""
-
-def wait_for_results_page(page):
-    """
-    Wait until the result/details page shows at least one of the expected fields.
-    """
-    page.wait_for_load_state("domcontentloaded")
-    deadline = time.time() + 15
-
-    while time.time() < deadline:
-        try:
-            paint = try_extract_from_xpaths(page, PAINT_CODE_XPATHS)
-            upholstery = try_extract_from_xpaths(page, UPHOLSTERY_CODE_XPATHS)
-            vin = extract_full_vin(page)
-
-            if paint or upholstery or vin:
-                return True
-        except Exception:
-            pass
-
-        time.sleep(0.75)
-
-    return False
-
-def search_last7(page, last7: str):
-    # There are multiple "Start new search" fields.
-    # The VIN field is the first visible text input on the left.
-    search_box = page.locator('input[type="text"]').nth(0)
-    search_box.wait_for(state="visible", timeout=DEFAULT_TIMEOUT_MS)
-    search_box.click()
-    search_box.fill("")
-    search_box.type(last7, delay=70)
-    search_box.press("Enter")
-    time.sleep(SEARCH_LOAD_WAIT)
-
-def extract_vehicle_data(page):
-    full_vin = extract_full_vin(page)
-    paint_code = try_extract_from_xpaths(page, PAINT_CODE_XPATHS)
-    upholstery_code = try_extract_from_xpaths(page, UPHOLSTERY_CODE_XPATHS)
-    return full_vin, paint_code, upholstery_code
-
 def load_csv_rows(path):
     with open(path, "r", newline="", encoding="utf-8-sig") as f:
-        reader = csv.reader(f)
-        return list(reader)
+        return list(csv.reader(f))
 
 def save_csv_rows(path, rows):
     with open(path, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
         writer.writerows(rows)
-
-# =========================================================
-# RUN FILTER PARSER
-# =========================================================
 
 def expand_last7_range(start_code: str, end_code: str) -> set:
     start_code = clean_text(start_code).upper()
@@ -167,10 +74,7 @@ def expand_last7_range(start_code: str, end_code: str) -> set:
     if len(start_code) != 7 or len(end_code) != 7:
         raise ValueError(f"Invalid range values: {start_code}-{end_code}")
 
-    start_prefix = start_code[0]
-    end_prefix = end_code[0]
-
-    if start_prefix != end_prefix:
+    if start_code[0] != end_code[0]:
         raise ValueError(f"Range prefixes do not match: {start_code}-{end_code}")
 
     start_num = int(start_code[1:])
@@ -179,7 +83,7 @@ def expand_last7_range(start_code: str, end_code: str) -> set:
     if start_num > end_num:
         start_num, end_num = end_num, start_num
 
-    return {f"{start_prefix}{num:06d}" for num in range(start_num, end_num + 1)}
+    return {f"{start_code[0]}{num:06d}" for num in range(start_num, end_num + 1)}
 
 def parse_run_filter(filter_text: str) -> set:
     filter_text = clean_text(filter_text)
@@ -194,12 +98,66 @@ def parse_run_filter(filter_text: str) -> set:
             left, right = part.split("-", 1)
             selected.update(expand_last7_range(left, right))
         else:
-            code = clean_text(part).upper()
-            if len(code) != 7:
-                raise ValueError(f"Invalid last7 in RUN_FILTER: {code}")
-            selected.add(code)
+            if len(part) != 7:
+                raise ValueError(f"Invalid last7 in RUN_FILTER: {part}")
+            selected.add(part)
 
     return selected
+
+# =========================================================
+# BMW AIR ACTIONS
+# =========================================================
+
+def search_last7(page, last7: str):
+    # Top-left VIN search field
+    search_box = page.locator('input[type="text"]').nth(0)
+    search_box.wait_for(state="visible", timeout=DEFAULT_TIMEOUT_MS)
+    search_box.click()
+    search_box.fill("")
+    search_box.type(last7, delay=70)
+    search_box.press("Enter")
+    time.sleep(SEARCH_LOAD_WAIT)
+
+def extract_vehicle_data(page):
+    full_vin = ""
+    paint_code = ""
+    upholstery_code = ""
+
+    texts = []
+
+    # Main page text
+    try:
+        txt = page.evaluate("() => document.body ? document.body.innerText : ''")
+        if txt:
+            texts.append(txt)
+    except Exception:
+        pass
+
+    # All frame texts
+    for frame in page.frames:
+        try:
+            txt = frame.evaluate("() => document.body ? document.body.innerText : ''")
+            if txt:
+                texts.append(txt)
+        except Exception:
+            pass
+
+    all_text = "\n".join(texts)
+    all_text = clean_text(all_text)
+
+    vin_match = re.search(r"\b(WBS[A-Z0-9]{14})\b", all_text)
+    if vin_match:
+        full_vin = vin_match.group(1)
+
+    paint_match = re.search(r"Paint code\s+([0-9]{3})\b", all_text, re.IGNORECASE)
+    if paint_match:
+        paint_code = paint_match.group(1)
+
+    upholstery_match = re.search(r"Upholstery code\s+([A-Z0-9]{4})\b", all_text, re.IGNORECASE)
+    if upholstery_match:
+        upholstery_code = upholstery_match.group(1)
+
+    return full_vin, paint_code, upholstery_code
 
 # =========================================================
 # MAIN
@@ -269,38 +227,30 @@ def main():
             if selected_last7 and last7 not in selected_last7:
                 continue
 
-            # Skip if all three target fields already exist
             if existing_vin and existing_paint and existing_upholstery:
                 print(f"Row {row_num + 1}: already filled, skipping.")
                 continue
-
-            full_vin = ""
-            paint_code = ""
-            upholstery_code = ""
 
             print(f"\nProcessing row {row_num + 1} | LAST7={last7}")
 
             try:
                 search_last7(page, last7)
 
-                if not wait_for_results_page(page):
-                    print(f"Row {row_num + 1}: Timeout waiting for result details page")
-                else:
-                    full_vin, paint_code, upholstery_code = extract_vehicle_data(page)
+                full_vin, paint_code, upholstery_code = extract_vehicle_data(page)
 
-                    if full_vin:
-                        row[COL_FULL_VIN] = full_vin
-                    if paint_code:
-                        row[COL_PAINT_CODE] = paint_code
-                    if upholstery_code:
-                        row[COL_UPHOLSTERY] = upholstery_code
+                if full_vin:
+                    row[COL_FULL_VIN] = full_vin
+                if paint_code:
+                    row[COL_PAINT_CODE] = paint_code
+                if upholstery_code:
+                    row[COL_UPHOLSTERY] = upholstery_code
 
-                    print(f"Full VIN:         {full_vin or '[blank]'}")
-                    print(f"Paint code:       {paint_code or '[blank]'}")
-                    print(f"Upholstery code:  {upholstery_code or '[blank]'}")
+                print(f"Full VIN:         {full_vin or '[blank]'}")
+                print(f"Paint code:       {paint_code or '[blank]'}")
+                print(f"Upholstery code:  {upholstery_code or '[blank]'}")
 
-                    if not full_vin and not paint_code and not upholstery_code:
-                        print("Status: selector mismatch or no data found")
+                if not full_vin and not paint_code and not upholstery_code:
+                    print("Status: extraction failed")
 
             except PlaywrightTimeoutError:
                 print(f"Row {row_num + 1}: Timeout")
