@@ -10,7 +10,7 @@ from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeo
 
 INPUT_CSV = "2010_E90_M3_master_cleaned.csv"
 OUTPUT_CSV = "vin_output_filled.csv"
-BMW_AIR_URL = "https://your-bmw-air-url-here.com"
+BMW_AIR_URL = "https://bmwtechinfo.bmwgroup.com/tisUI/#/home"
 
 DAILY_LIMIT = 50
 DELAY_MIN = 7
