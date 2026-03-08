@@ -19,13 +19,43 @@ DEFAULT_TIMEOUT_MS = 30000
 HAS_HEADER = False
 
 # Safer test batch first
-RUN_FILTER = "E202200-E202205"
+RUN_FILTER = "E202200-E202202"
 
 # Excel E = 4, G = 6, I = 8, K = 10
 COL_PAINT_CODE = 4
 COL_UPHOLSTERY = 6
 COL_FULL_VIN = 8
 COL_LAST7 = 10
+
+PAINT_CODE_MAP = {
+    "300": "Alpine White",
+    "668": "Jet Black",
+    "A29": "Silverstone Metallic II | $550.00",
+    "A30": "Interlogos Blue Metallic | $550.00",
+    "A52": "Space Gray Metallic | $550.00",
+    "A73": "Jerez Black Metallic | $550.00",
+    "A75": "Melbourne Red Metallic | $550.00",
+    "381": "Le Mans Blue Metallic | $550.00",
+    "490": "Special Paint | $5,000.00",
+    "U91": "Frozen Black Metallic | $5,000.00",
+    "U94": "Fire Orange 2 | $5,000.00",
+    "337": "Dakar Yellow | $5,000.00",
+    "B21": "Atacama Yellow | $5,000.00",
+}
+
+UPHOLSTERY_CODE_MAP = {
+    "GEAT": "Anthracite/Black Cloth & Leather | $0.00",
+    "NCSW": "Black Novillo Leather | $950.00",
+    "NDSW": "Black Extended Novillo Leather | $1,100.00/$2,000.00",
+    "NCH1": "Silver Novillo Leather | $950.00",
+    "NDH1": "Silver Novillo Extended Leather | $1,100.00/$2,000.00",
+    "NCH2": "Fox Red Novillo Leather | $950.00",
+    "NDH2": "Fox Red Extended Leather | $1,100.00/$2,000.00",
+    "NCH3": "Beige Novillo Leather | $950.00",
+    "NDH3": "Beige Novillo Extended Leather | $1,100.00/$2,000.00",
+    "NCH4": "Palladium/Black Novillo Leather | $300.00/$1,250.00",
+    "NCH5": "Fox Red/Black Novillo Leather | $300.00/$1,250.00",
+}
 
 
 def clean_text(value: str) -> str:
@@ -259,10 +289,14 @@ def main():
 
                 if full_vin:
                     row[COL_FULL_VIN] = full_vin
+
                 if paint_code:
-                    row[COL_PAINT_CODE] = paint_code
+                    paint_display = f"{paint_code} - {PAINT_CODE_MAP.get(paint_code, 'Unknown Paint Code')}"
+                    row[COL_PAINT_CODE] = paint_display
+
                 if upholstery_code:
-                    row[COL_UPHOLSTERY] = upholstery_code
+                    upholstery_display = f"{upholstery_code} - {UPHOLSTERY_CODE_MAP.get(upholstery_code, 'Unknown Upholstery Code')}"
+                    row[COL_UPHOLSTERY] = upholstery_display
 
                 print(f"Full VIN:         {full_vin or '[blank]'}")
                 print(f"Paint code:       {paint_code or '[blank]'}")
