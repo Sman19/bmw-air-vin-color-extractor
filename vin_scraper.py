@@ -1,5 +1,4 @@
 import csv
-import os
 import random
 import time
 from pathlib import Path
@@ -10,16 +9,39 @@ from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeo
 # =========================================================
 
 INPUT_CSV = "vin_input.csv"
-OUTPUT_CSV = "vin_output_with_colors.csv"
+OUTPUT_CSV = "vin_output_filled.csv"
 BMW_AIR_URL = "https://your-bmw-air-url-here.com"
 
-DAILY_LIMIT = 50          # change to 100 if you want
-DELAY_MIN = 7             # random wait min seconds
-DELAY_MAX = 18            # random wait max seconds
-SEARCH_LOAD_WAIT = 3      # base wait after pressing Enter
+DAILY_LIMIT = 50
+DELAY_MIN = 7
+DELAY_MAX = 18
+SEARCH_LOAD_WAIT = 3
 HEADLESS = False
 SLOW_MO_MS = 150
 DEFAULT_TIMEOUT_MS = 15000
+HAS_HEADER = True
+
+# =========================================================
+# FILTER MODE
+# Leave blank "" to run all eligible rows
+#
+# Examples:
+# RUN_FILTER = "E202200-E202257"
+# RUN_FILTER = "E202200,E202205,E202244"
+# RUN_FILTER = "E202200-E202210,E202244,E202250-E202255"
+# =========================================================
+
+RUN_FILTER = ""
+
+# =========================================================
+# COLUMN INDEXES (0-based)
+# Excel E = 4, G = 6, I = 8, K = 10
+# =========================================================
+
+COL_EXTERIOR = 4   # E
+COL_INTERIOR = 6   # G
+COL_FULL_VIN = 8   # I
+COL_LAST7 = 10     # K
 
 # =========================================================
 # SELECTORS - THESE WILL PROBABLY NEED ADJUSTMENT
@@ -27,7 +49,11 @@ DEFAULT_TIMEOUT_MS = 15000
 
 SEARCH_INPUT_SELECTOR = 'input[type="text"]'
 
-# Try a few possible label spellings / layouts
+FULL_VIN_XPATHS = [
+    'xpath=//*[contains(normalize-space(),"VIN")]/following::*[1]',
+    'xpath=//*[contains(normalize-space(),"Vehicle Identification Number")]/following::*[1]',
+]
+
 EXTERIOR_COLOR_XPATHS = [
     'xpath=//*[contains(normalize-space(),"Exterior Color")]/following::*[1]',
     'xpath=//*[contains(normalize-space(),"Ext. Color")]/following::*[1]',
@@ -36,8 +62,9 @@ EXTERIOR_COLOR_XPATHS = [
 
 INTERIOR_COLOR_XPATHS = [
     'xpath=//*[contains(normalize-space(),"Interior Color")]/following::*[1]',
-    'xpath=//*[contains(normalize-space(),"Upholstery")]/following::*[1]',
     'xpath=//*[contains(normalize-space(),"Int. Color")]/following::*[1]',
+    'xpath=//*[contains(normalize-space(),"Upholstery")]/following::*[1]',
+    'xpath=//*[contains(normalize-space(),"Leather")]/following::*[1]',
 ]
 
 # =========================================================
@@ -54,70 +81,12 @@ def random_delay():
     print(f"Waiting {delay:.1f} seconds...")
     time.sleep(delay)
 
-def ensure_output_exists(output_path: str):
-    if not Path(output_path).exists():
-        with open(output_path, "w", newline="", encoding="utf-8") as f:
-            writer = csv.DictWriter(
-                f,
-                fieldnames=["vin", "last7", "exterior_color", "interior_color", "status"]
-            )
-            writer.writeheader()
+def ensure_row_length(row, min_len):
+    while len(row) < min_len:
+        row.append("")
+    return row
 
-def load_already_processed(output_path: str) -> set:
-    processed = set()
-    if not Path(output_path).exists():
-        return processed
-
-    with open(output_path, "r", newline="", encoding="utf-8-sig") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            vin = clean_text(row.get("vin", ""))
-            last7 = clean_text(row.get("last7", ""))
-            if vin and last7:
-                processed.add((vin, last7))
-    return processed
-
-def append_result(output_path: str, row: dict):
-    with open(output_path, "a", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(
-            f,
-            fieldnames=["vin", "last7", "exterior_color", "interior_color", "status"]
-        )
-        writer.writerow(row)
-
-def read_input_csv(input_path: str) -> list:
-    rows = []
-    with open(input_path, "r", newline="", encoding="utf-8-sig") as f:
-        reader = csv.DictReader(f)
-        required = {"vin", "last7"}
-        if not reader.fieldnames:
-            raise ValueError("Input CSV is missing headers.")
-        missing = required - set(h.strip() for h in reader.fieldnames if h)
-        if missing:
-            raise ValueError(f"Input CSV must contain headers: vin,last7 | Missing: {', '.join(sorted(missing))}")
-
-        for line in reader:
-            vin = clean_text(line.get("vin", ""))
-            last7 = clean_text(line.get("last7", "")).upper()
-
-            if not vin or not last7:
-                continue
-
-            if len(last7) != 7:
-                rows.append({
-                    "vin": vin,
-                    "last7": last7,
-                    "skip_reason": "last7 is not 7 characters"
-                })
-            else:
-                rows.append({
-                    "vin": vin,
-                    "last7": last7,
-                    "skip_reason": ""
-                })
-    return rows
-
-def try_extract_from_xpaths(page, xpaths: list[str]) -> str:
+def try_extract_from_xpaths(page, xpaths):
     for xp in xpaths:
         try:
             locator = page.locator(xp).first
@@ -138,10 +107,77 @@ def search_last7(page, last7: str):
     search_box.press("Enter")
     time.sleep(SEARCH_LOAD_WAIT)
 
-def extract_colors(page) -> tuple[str, str]:
+def extract_vehicle_data(page):
+    full_vin = try_extract_from_xpaths(page, FULL_VIN_XPATHS)
     exterior = try_extract_from_xpaths(page, EXTERIOR_COLOR_XPATHS)
     interior = try_extract_from_xpaths(page, INTERIOR_COLOR_XPATHS)
-    return exterior, interior
+    return full_vin, exterior, interior
+
+def load_csv_rows(path):
+    with open(path, "r", newline="", encoding="utf-8-sig") as f:
+        reader = csv.reader(f)
+        return list(reader)
+
+def save_csv_rows(path, rows):
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerows(rows)
+
+# =========================================================
+# RUN FILTER PARSER
+# =========================================================
+
+def expand_last7_range(start_code: str, end_code: str) -> set:
+    """
+    Example:
+    E202200-E202257
+    -> E202200, E202201, ... E202257
+    """
+    start_code = clean_text(start_code).upper()
+    end_code = clean_text(end_code).upper()
+
+    if len(start_code) != 7 or len(end_code) != 7:
+        raise ValueError(f"Invalid range values: {start_code}-{end_code}")
+
+    start_prefix = start_code[0]
+    end_prefix = end_code[0]
+
+    if start_prefix != end_prefix:
+        raise ValueError(f"Range prefixes do not match: {start_code}-{end_code}")
+
+    start_num = int(start_code[1:])
+    end_num = int(end_code[1:])
+
+    if start_num > end_num:
+        start_num, end_num = end_num, start_num
+
+    return {f"{start_prefix}{num:06d}" for num in range(start_num, end_num + 1)}
+
+def parse_run_filter(filter_text: str) -> set:
+    """
+    Supports:
+    - single values: E202244
+    - ranges: E202200-E202257
+    - mixed: E202200-E202210,E202244,E202250-E202255
+    """
+    filter_text = clean_text(filter_text)
+    if not filter_text:
+        return set()
+
+    selected = set()
+    parts = [p.strip().upper() for p in filter_text.split(",") if p.strip()]
+
+    for part in parts:
+        if "-" in part:
+            left, right = part.split("-", 1)
+            selected.update(expand_last7_range(left, right))
+        else:
+            code = clean_text(part).upper()
+            if len(code) != 7:
+                raise ValueError(f"Invalid last7 in RUN_FILTER: {code}")
+            selected.add(code)
+
+    return selected
 
 # =========================================================
 # MAIN
@@ -152,33 +188,25 @@ def main():
         print(f"Input CSV not found: {INPUT_CSV}")
         return
 
-    ensure_output_exists(OUTPUT_CSV)
-
-    input_rows = read_input_csv(INPUT_CSV)
-    already_processed = load_already_processed(OUTPUT_CSV)
-
-    valid_rows = []
-    for row in input_rows:
-        vin = row["vin"]
-        last7 = row["last7"]
-
-        if row["skip_reason"]:
-            print(f"Skipping {vin} / {last7}: {row['skip_reason']}")
-            continue
-
-        if (vin, last7) in already_processed:
-            continue
-
-        valid_rows.append(row)
-
-    if not valid_rows:
-        print("No new VINs to process.")
+    rows = load_csv_rows(INPUT_CSV)
+    if not rows:
+        print("CSV is empty.")
         return
 
-    to_process = valid_rows[:DAILY_LIMIT]
+    try:
+        selected_last7 = parse_run_filter(RUN_FILTER)
+    except Exception as e:
+        print(f"RUN_FILTER error: {e}")
+        return
 
-    print(f"Found {len(valid_rows)} unprocessed VINs.")
-    print(f"Will process {len(to_process)} today (DAILY_LIMIT={DAILY_LIMIT}).")
+    if selected_last7:
+        print(f"RUN_FILTER active. {len(selected_last7)} last7 values selected.")
+    else:
+        print("RUN_FILTER blank. Running all eligible rows.")
+
+    start_index = 1 if HAS_HEADER else 0
+    max_needed_cols = max(COL_EXTERIOR, COL_INTERIOR, COL_FULL_VIN, COL_LAST7) + 1
+    processed_today = 0
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=HEADLESS, slow_mo=SLOW_MO_MS)
@@ -191,48 +219,68 @@ def main():
 
         input("Log into BMW AIR manually, navigate to the VIN search page, then press ENTER here...")
 
-        for i, row in enumerate(to_process, start=1):
-            vin = row["vin"]
-            last7 = row["last7"]
+        for row_num in range(start_index, len(rows)):
+            if processed_today >= DAILY_LIMIT:
+                print(f"Reached DAILY_LIMIT={DAILY_LIMIT}. Stopping for today.")
+                break
 
+            row = ensure_row_length(rows[row_num], max_needed_cols)
+
+            last7 = clean_text(row[COL_LAST7]).upper()
+            existing_vin = clean_text(row[COL_FULL_VIN])
+            existing_ext = clean_text(row[COL_EXTERIOR])
+            existing_int = clean_text(row[COL_INTERIOR])
+
+            if not last7:
+                print(f"Row {row_num + 1}: blank last7 in column K, skipping.")
+                continue
+
+            if len(last7) != 7:
+                print(f"Row {row_num + 1}: invalid last7 '{last7}', skipping.")
+                continue
+
+            if selected_last7 and last7 not in selected_last7:
+                continue
+
+            if existing_vin and existing_ext and existing_int:
+                print(f"Row {row_num + 1}: already filled, skipping.")
+                continue
+
+            full_vin = ""
             exterior = ""
             interior = ""
-            status = "OK"
 
-            print(f"\n[{i}/{len(to_process)}] Processing VIN={vin} | LAST7={last7}")
+            print(f"\nProcessing row {row_num + 1} | LAST7={last7}")
 
             try:
                 search_last7(page, last7)
-                exterior, interior = extract_colors(page)
+                full_vin, exterior, interior = extract_vehicle_data(page)
 
-                if not exterior and not interior:
-                    status = "No data found / selector mismatch"
+                if full_vin:
+                    row[COL_FULL_VIN] = full_vin
+                if exterior:
+                    row[COL_EXTERIOR] = exterior
+                if interior:
+                    row[COL_INTERIOR] = interior
+
+                print(f"Full VIN:  {full_vin or '[blank]'}")
+                print(f"Exterior:  {exterior or '[blank]'}")
+                print(f"Interior:  {interior or '[blank]'}")
 
             except PlaywrightTimeoutError:
-                status = "Timeout"
+                print(f"Row {row_num + 1}: Timeout")
             except Exception as e:
-                status = f"Error: {str(e)}"
+                print(f"Row {row_num + 1}: Error: {e}")
 
-            result_row = {
-                "vin": vin,
-                "last7": last7,
-                "exterior_color": exterior,
-                "interior_color": interior,
-                "status": status
-            }
+            processed_today += 1
 
-            append_result(OUTPUT_CSV, result_row)
-
-            print(f"Exterior: {exterior or '[blank]'}")
-            print(f"Interior: {interior or '[blank]'}")
-            print(f"Status:   {status}")
-
-            if i < len(to_process):
+            if processed_today < DAILY_LIMIT:
                 random_delay()
 
         browser.close()
 
-    print(f"\nDone. Results saved to: {OUTPUT_CSV}")
+    save_csv_rows(OUTPUT_CSV, rows)
+    print(f"\nDone. Saved updated file to: {OUTPUT_CSV}")
 
 if __name__ == "__main__":
     main()
